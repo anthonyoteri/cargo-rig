@@ -248,121 +248,108 @@ async fn graceful_kill(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
 }
 
-/// Run a single test subprocess, respecting timeout and capture settings.
-#[allow(clippy::too_many_lines)]
-async fn spawn_test_process(
-    exe: &std::path::Path,
-    test_name: &str,
-    state_var: &str,
-    state_json: &str,
-    no_capture: bool,
+/// Wait for `child` to exit, killing it gracefully if `timeout` elapses.
+/// Returns `None` when the timeout fired and the child was killed.
+async fn wait_or_timeout(
+    child: &mut tokio::process::Child,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    match timeout {
+        Some(dur) => tokio::select! {
+            r = child.wait() => r.map(Some).map_err(|e| anyhow!("{e}")),
+            () = tokio::time::sleep(dur) => {
+                graceful_kill(child).await;
+                Ok(None)
+            }
+        },
+        None => child.wait().await.map(Some).map_err(|e| anyhow!("{e}")),
+    }
+}
+
+fn timeout_outcome(dur: std::time::Duration) -> ProcessOutcome {
+    ProcessOutcome::Failed {
+        reason: format!("timed out after {:.1}s", dur.as_secs_f64()),
+        stdout: String::new(),
+        stderr: String::new(),
+    }
+}
+
+async fn drain_pipe<R>(handle: Option<R>) -> String
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    if let Some(mut h) = handle {
+        let _ = h.read_to_end(&mut bytes).await;
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn skip_reason_from_stderr(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("cargo-rigtest-skip: "))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Spawn in no-capture mode: stdout inherited, stderr piped for skip-reason extraction.
+async fn spawn_no_capture(
+    mut cmd: tokio::process::Command,
     timeout: Option<std::time::Duration>,
 ) -> anyhow::Result<ProcessOutcome> {
-    use tokio::io::AsyncReadExt;
-    use tokio::process::Command;
+    let mut child = cmd
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
 
-    let mut cmd = Command::new(exe);
-    cmd.arg("--run-single")
-        .arg(test_name)
-        .arg("--state-env-var")
-        .arg(state_var)
-        .env(state_var, state_json);
+    let Some(status) = wait_or_timeout(&mut child, timeout).await? else {
+        return Ok(timeout_outcome(timeout.unwrap_or_default()));
+    };
 
-    if no_capture {
-        // Stdout is inherited for real-time output. Stderr is piped so we can
-        // extract the skip reason (written as "cargo-rigtest-skip: …") while
-        // still replaying it to the terminal afterward.
-        let mut child = cmd
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
+    let stderr = drain_pipe(child.stderr.take()).await;
 
-        let status = match timeout {
-            Some(dur) => tokio::select! {
-                r = child.wait() => r.map_err(|e| anyhow!("{e}"))?,
-                () = tokio::time::sleep(dur) => {
-                    graceful_kill(&mut child).await;
-                    return Ok(ProcessOutcome::Failed {
-                        reason: format!("timed out after {:.1}s", dur.as_secs_f64()),
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    });
-                }
-            },
-            None => child.wait().await.map_err(|e| anyhow!("{e}"))?,
-        };
-
-        let mut stderr_bytes = Vec::new();
-        if let Some(mut h) = child.stderr.take() {
-            let _ = h.read_to_end(&mut stderr_bytes).await;
+    match status.code() {
+        Some(0) => Ok(ProcessOutcome::Passed),
+        Some(2) => Ok(ProcessOutcome::Skipped {
+            reason: skip_reason_from_stderr(&stderr),
+        }),
+        code => {
+            // Replay stderr to terminal since it wasn't inherited.
+            eprint!("{stderr}");
+            Ok(ProcessOutcome::Failed {
+                reason: format!("exited with code {}", code.unwrap_or(-1)),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         }
-        let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-
-        return match status.code() {
-            Some(0) => Ok(ProcessOutcome::Passed),
-            Some(2) => {
-                let reason = stderr
-                    .lines()
-                    .find_map(|l| l.strip_prefix("cargo-rigtest-skip: "))
-                    .unwrap_or("")
-                    .to_string();
-                Ok(ProcessOutcome::Skipped { reason })
-            }
-            code => {
-                // Replay stderr to terminal since it wasn't inherited.
-                eprint!("{stderr}");
-                Ok(ProcessOutcome::Failed {
-                    reason: format!("exited with code {}", code.unwrap_or(-1)),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                })
-            }
-        };
     }
+}
 
+/// Spawn in capture mode: both stdout and stderr piped, printed only on failure.
+async fn spawn_captured(
+    mut cmd: tokio::process::Command,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<ProcessOutcome> {
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
 
-    let status = match timeout {
-        Some(dur) => tokio::select! {
-            r = child.wait() => r.map_err(|e| anyhow!("{e}"))?,
-            () = tokio::time::sleep(dur) => {
-                graceful_kill(&mut child).await;
-                return Ok(ProcessOutcome::Failed {
-                    reason: format!("timed out after {:.1}s", dur.as_secs_f64()),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-            }
-        },
-        None => child.wait().await.map_err(|e| anyhow!("{e}"))?,
+    let Some(status) = wait_or_timeout(&mut child, timeout).await? else {
+        return Ok(timeout_outcome(timeout.unwrap_or_default()));
     };
 
-    let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
-    if let Some(mut h) = child.stdout.take() {
-        let _ = h.read_to_end(&mut stdout_bytes).await;
-    }
-    if let Some(mut h) = child.stderr.take() {
-        let _ = h.read_to_end(&mut stderr_bytes).await;
-    }
-
-    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    let stdout = drain_pipe(child.stdout.take()).await;
+    let stderr = drain_pipe(child.stderr.take()).await;
 
     match status.code() {
         Some(0) => Ok(ProcessOutcome::Passed),
-        Some(2) => {
-            let reason = stderr
-                .lines()
-                .find_map(|l| l.strip_prefix("cargo-rigtest-skip: "))
-                .unwrap_or("")
-                .to_string();
-            Ok(ProcessOutcome::Skipped { reason })
-        }
+        Some(2) => Ok(ProcessOutcome::Skipped {
+            reason: skip_reason_from_stderr(&stderr),
+        }),
         code => {
             let reason = if stderr.trim().is_empty() {
                 format!("exited with code {}", code.unwrap_or(-1))
@@ -375,6 +362,29 @@ async fn spawn_test_process(
                 stderr: String::new(),
             })
         }
+    }
+}
+
+/// Run a single test subprocess, respecting timeout and capture settings.
+async fn spawn_test_process(
+    exe: &std::path::Path,
+    test_name: &str,
+    state_var: &str,
+    state_json: &str,
+    no_capture: bool,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<ProcessOutcome> {
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.arg("--run-single")
+        .arg(test_name)
+        .arg("--state-env-var")
+        .arg(state_var)
+        .env(state_var, state_json);
+
+    if no_capture {
+        spawn_no_capture(cmd, timeout).await
+    } else {
+        spawn_captured(cmd, timeout).await
     }
 }
 
