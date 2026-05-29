@@ -15,6 +15,12 @@ pub struct TestContext {
 }
 
 impl TestContext {
+    /// Creates a new [`TestContext`] wrapping `global_data` produced by `#[global_setup]`.
+    ///
+    /// This is called by the cargo-rigtest coordinator inside each test subprocess
+    /// before invoking the test function. Test authors receive an already-constructed
+    /// `Arc<TestContext>` as the argument to their test function and do not call
+    /// this directly.
     #[must_use]
     pub fn new(global_data: Box<dyn Any + Send + Sync>) -> Arc<Self> {
         Arc::new(Self {

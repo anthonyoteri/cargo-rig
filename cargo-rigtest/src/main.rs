@@ -188,9 +188,16 @@ fn is_rig_binary(exe: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Search the JSON-lines output from `cargo test --no-run --message-format=json`
-/// for all `compiler-artifact` entries whose target kind is "test".
-/// Returns a list of `(name, executable_path)` pairs in the order they appear.
+/// Parse `cargo test --no-run --message-format=json` output and return all
+/// test-target executables.
+///
+/// `json_output` is the raw stdout from the `cargo test --no-run
+/// --message-format=json` invocation — a newline-delimited sequence of JSON
+/// objects. Each object is inspected for `"reason": "compiler-artifact"` with
+/// a `"target"` whose `"kind"` array contains `"test"`.
+///
+/// Returns a `Vec` of `(name, executable_path)` pairs in the order they appear
+/// in the input. Malformed lines and non-test artifacts are silently ignored.
 #[must_use]
 pub fn find_all_test_executables(json_output: &str) -> Vec<(String, String)> {
     let mut results = Vec::new();
