@@ -8,9 +8,11 @@ edition = "2021"
 authors = ["Anthony Oteri <anthony.oteri@agiletv.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anthonyoteri/cargo-rigtest"
+homepage = "https://github.com/anthonyoteri/cargo-rigtest"
 rust-version = "1.87"
 
 [workspace.dependencies]
+rigtest-macros = { version = "0.1", path = "rigtest-macros" }
 libc = "0.2"
 tokio = { version = "1", features = ["full"] }
 linkme = "0.3"

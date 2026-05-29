@@ -5,7 +5,13 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+readme = "../README.md"
+keywords = ["testing", "cargo", "integration-testing", "acceptance-testing", "subprocess"]
+categories = ["development-tools::testing", "command-line-utilities"]
+exclude = ["/.github", "/examples"]
 
 [[bin]]
 name = "cargo-rigtest"

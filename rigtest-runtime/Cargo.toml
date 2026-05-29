@@ -5,10 +5,16 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+readme = "../README.md"
+keywords = ["testing", "cargo", "integration-testing", "acceptance-testing", "subprocess"]
+categories = ["development-tools::testing", "asynchronous"]
+exclude = ["/.github", "/examples"]
 
 [dependencies]
-rigtest-macros = { path = "../rigtest-macros" }
+rigtest-macros = { workspace = true }
 tokio = { workspace = true }
 linkme = { workspace = true }
 clap = { workspace = true }
