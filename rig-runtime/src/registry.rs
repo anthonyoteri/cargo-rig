@@ -30,8 +30,7 @@ unsafe impl Sync for TestCase {}
 
 /// A global setup function, registered via `#[global_setup]`.
 pub struct GlobalSetupEntry {
-    pub setup_fn:
-        fn() -> BoxFuture<'static, Box<dyn std::any::Any + Send + Sync>>,
+    pub setup_fn: fn() -> BoxFuture<'static, Box<dyn std::any::Any + Send + Sync>>,
     /// Serialize the state value to a JSON string for subprocess handoff.
     pub serialize_fn: fn(&Box<dyn std::any::Any + Send + Sync>) -> String,
     /// Deserialize state from the JSON string produced by `serialize_fn`.
@@ -42,9 +41,7 @@ unsafe impl Sync for GlobalSetupEntry {}
 
 /// A global teardown function, registered via `#[global_teardown]`.
 pub struct GlobalTeardownEntry {
-    pub teardown_fn: fn(
-        Box<dyn std::any::Any + Send + Sync>,
-    ) -> BoxFuture<'static, ()>,
+    pub teardown_fn: fn(Box<dyn std::any::Any + Send + Sync>) -> BoxFuture<'static, ()>,
 }
 
 unsafe impl Sync for GlobalTeardownEntry {}

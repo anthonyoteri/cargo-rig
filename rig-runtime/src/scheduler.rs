@@ -4,8 +4,8 @@ use std::time::Instant;
 use anyhow::anyhow;
 use clap::Parser;
 use futures::FutureExt;
-use rand::SeedableRng;
 use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -16,8 +16,7 @@ use crate::registry::RIG_TEST_CASES;
 use crate::reporter::Reporter;
 
 fn default_jobs() -> usize {
-    std::thread::available_parallelism()
-        .map_or(4, std::num::NonZero::get)
+    std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
 }
 
 /// Arguments forwarded from `cargo rig run` into the test binary.
@@ -44,7 +43,6 @@ pub struct RuntimeArgs {
     // ── Internal flags used in subprocess (single-test) mode ─────────────────
     // Hidden from `--help`; set by the coordinator when spawning per-test
     // subprocesses.
-
     /// Run exactly one named test case and exit. Used internally.
     #[arg(long, hide = true)]
     pub run_single: Option<String>,
@@ -105,13 +103,10 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
 
     // Serialize state for subprocess handoff, choosing a randomized env var
     // name so it is not guessable by other processes on the same host.
-    let state_var = format!(
-        "RIG_STATE_{:016x}",
-        {
-            use rand::RngCore;
-            rand::thread_rng().next_u64()
-        }
-    );
+    let state_var = format!("RIG_STATE_{:016x}", {
+        use rand::RngCore;
+        rand::thread_rng().next_u64()
+    });
     let state_json: String = if let Some(entry) = RIG_GLOBAL_SETUP.first() {
         (entry.serialize_fn)(&global_data)
     } else {
@@ -136,17 +131,15 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
     let jobs = match (args.no_capture, args.jobs) {
         (true, None) => 1,
         (true, Some(n)) => {
-            eprintln!(
-                "cargo-rig: warning: --no-capture with --jobs={n} may interleave output"
-            );
+            eprintln!("cargo-rig: warning: --no-capture with --jobs={n} may interleave output");
             n
         }
         (false, n) => n.unwrap_or_else(default_jobs),
     };
     let semaphore = Arc::new(Semaphore::new(jobs));
 
-    let exe = std::env::current_exe()
-        .map_err(|e| anyhow!("failed to find current executable: {e}"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow!("failed to find current executable: {e}"))?;
 
     let suite_start = Instant::now();
 
@@ -174,7 +167,8 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
                 .acquire()
                 .await
                 .expect("semaphore should not be closed");
-            let (outcome, _) = run_test(&reporter, &exe, tc, &state_var, &state_json, no_capture).await;
+            let (outcome, _) =
+                run_test(&reporter, &exe, tc, &state_var, &state_json, no_capture).await;
             outcome
         });
     }
@@ -190,7 +184,15 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
 
     // ── Serial phase ─────────────────────────────────────────────────────────
     for tc in serial_cases {
-        let (outcome, _) = run_test(&reporter, &exe, tc, &state_var, &state_json, args.no_capture).await;
+        let (outcome, _) = run_test(
+            &reporter,
+            &exe,
+            tc,
+            &state_var,
+            &state_json,
+            args.no_capture,
+        )
+        .await;
         match outcome {
             Outcome::Passed => passed += 1,
             Outcome::Skipped => skipped += 1,
@@ -216,11 +218,17 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
 }
 
 #[derive(Clone, Copy)]
-enum Outcome { Passed, Skipped, Failed }
+enum Outcome {
+    Passed,
+    Skipped,
+    Failed,
+}
 
 enum ProcessOutcome {
     Passed,
-    Skipped { reason: String },
+    Skipped {
+        reason: String,
+    },
     Failed {
         reason: String,
         stdout: String,
@@ -242,7 +250,7 @@ async fn graceful_kill(child: &mut tokio::process::Child) {
         // Send SIGTERM so destructors and signal handlers can run.
         if let Some(pid) = child.id() {
             // SAFETY: kill(2) is safe to call with a valid pid and signal number.
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
         }
 
         // Give the process a chance to exit on its own.
@@ -297,7 +305,9 @@ async fn spawn_test_process(
 
         return match status.code() {
             Some(0) => Ok(ProcessOutcome::Passed),
-            Some(2) => Ok(ProcessOutcome::Skipped { reason: String::new() }),
+            Some(2) => Ok(ProcessOutcome::Skipped {
+                reason: String::new(),
+            }),
             code => Ok(ProcessOutcome::Failed {
                 reason: format!("exited with code {}", code.unwrap_or(-1)),
                 stdout: String::new(),
@@ -356,7 +366,11 @@ async fn spawn_test_process(
             } else {
                 stderr.trim().to_string()
             };
-            Ok(ProcessOutcome::Failed { reason, stdout, stderr: String::new() })
+            Ok(ProcessOutcome::Failed {
+                reason,
+                stdout,
+                stderr: String::new(),
+            })
         }
     }
 }
@@ -375,15 +389,8 @@ async fn run_test(
     let max_attempts = tc.retries + 1;
 
     for attempt in 1..=max_attempts {
-        let outcome = spawn_test_process(
-            exe,
-            tc.name,
-            state_var,
-            state_json,
-            no_capture,
-            tc.timeout,
-        )
-        .await;
+        let outcome =
+            spawn_test_process(exe, tc.name, state_var, state_json, no_capture, tc.timeout).await;
 
         let is_last = attempt == max_attempts;
         let duration = test_start.elapsed();
@@ -397,7 +404,11 @@ async fn run_test(
                 reporter.test_skipped(&pb, tc.name, duration, &reason);
                 return (Outcome::Skipped, duration);
             }
-            Ok(ProcessOutcome::Failed { reason, stdout, stderr }) => {
+            Ok(ProcessOutcome::Failed {
+                reason,
+                stdout,
+                stderr,
+            }) => {
                 if is_last {
                     reporter.test_failed(&pb, tc.name, duration, &reason, &stdout, &stderr);
                     return (Outcome::Failed, duration);
@@ -417,26 +428,21 @@ async fn run_test(
     unreachable!()
 }
 
-
 /// Single-test mode: deserialize global state, run one test, exit.
-async fn run_single_test(
-    test_name: &str,
-    state_var: Option<&str>,
-) -> anyhow::Result<()> {
+async fn run_single_test(test_name: &str, state_var: Option<&str>) -> anyhow::Result<()> {
     // Deserialize state and immediately clear the env var.
-    let global_data: Box<dyn std::any::Any + Send + Sync> =
-        if let Some(var) = state_var {
-            let json = std::env::var(var).unwrap_or_default();
-            std::env::remove_var(var);
+    let global_data: Box<dyn std::any::Any + Send + Sync> = if let Some(var) = state_var {
+        let json = std::env::var(var).unwrap_or_default();
+        std::env::remove_var(var);
 
-            if let Some(entry) = RIG_GLOBAL_SETUP.first() {
-                (entry.deserialize_fn)(&json)
-            } else {
-                Box::new(())
-            }
+        if let Some(entry) = RIG_GLOBAL_SETUP.first() {
+            (entry.deserialize_fn)(&json)
         } else {
             Box::new(())
-        };
+        }
+    } else {
+        Box::new(())
+    };
 
     let tc = RIG_TEST_CASES
         .iter()
@@ -465,9 +471,9 @@ async fn run_single_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::TestContext;
     use crate::registry::{BoxFuture, TestCase};
     use std::sync::Arc;
-    use crate::context::TestContext;
 
     fn make_case(name: &'static str) -> TestCase {
         TestCase {
@@ -477,9 +483,10 @@ mod tests {
             serial: false,
             timeout: None,
             retries: 0,
-            test_fn: |_ctx: Arc<TestContext>| -> BoxFuture<'static, Result<(), Box<dyn std::error::Error + Send + Sync>>> {
-                Box::pin(async { Ok(()) })
-            },
+            test_fn: |_ctx: Arc<TestContext>| -> BoxFuture<
+                'static,
+                Result<(), Box<dyn std::error::Error + Send + Sync>>,
+            > { Box::pin(async { Ok(()) }) },
         }
     }
 
@@ -492,7 +499,11 @@ mod tests {
 
     #[test]
     fn filter_matches_substring() {
-        let cases = [make_case("test_login"), make_case("test_logout"), make_case("health_check")];
+        let cases = [
+            make_case("test_login"),
+            make_case("test_logout"),
+            make_case("health_check"),
+        ];
         let refs: Vec<&TestCase> = cases.iter().collect();
         let filtered = apply_filter(&refs, Some("test_"));
         assert_eq!(filtered.len(), 2);

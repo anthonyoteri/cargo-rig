@@ -15,8 +15,8 @@ pub mod reporter;
 pub mod scheduler;
 
 pub use context::TestContext;
-pub use scheduler::RuntimeArgs;
 pub use rig_macros::{global_setup, global_teardown, testcase};
+pub use scheduler::RuntimeArgs;
 
 /// Convenient glob import for test files.
 ///

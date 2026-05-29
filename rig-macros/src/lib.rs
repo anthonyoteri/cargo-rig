@@ -5,11 +5,11 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
+use syn::parse::Parser;
+use syn::parse_macro_input;
 use syn::FnArg;
 use syn::ItemFn;
 use syn::Pat;
-use syn::parse::Parser;
-use syn::parse_macro_input;
 
 /// Registers an async test function with the cargo-rig runtime.
 ///

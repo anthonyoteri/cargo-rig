@@ -21,7 +21,9 @@ struct State {
 
 #[global_setup]
 async fn setup() -> State {
-    State { max_operand: 1_000_000 }
+    State {
+        max_operand: 1_000_000,
+    }
 }
 
 #[global_teardown]

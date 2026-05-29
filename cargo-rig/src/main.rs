@@ -106,8 +106,7 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         ));
     }
 
-    let stdout =
-        String::from_utf8(output.stdout).context("cargo output was not valid UTF-8")?;
+    let stdout = String::from_utf8(output.stdout).context("cargo output was not valid UTF-8")?;
 
     let all_targets = find_all_test_executables(&stdout);
 
@@ -218,7 +217,9 @@ pub fn find_all_test_executables(json_output: &str) -> Vec<(String, String)> {
             continue;
         }
 
-        let Some(target) = value.get("target") else { continue };
+        let Some(target) = value.get("target") else {
+            continue;
+        };
 
         let kind_is_test = target
             .get("kind")

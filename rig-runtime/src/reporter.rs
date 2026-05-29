@@ -3,7 +3,10 @@ use std::time::Duration;
 use console::style;
 
 fn indent(s: &str) -> String {
-    s.lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n")
+    s.lines()
+        .map(|l| format!("  {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 use indicatif::MultiProgress;
 use indicatif::ProgressBar;
@@ -171,11 +174,14 @@ impl Reporter {
         let failed = total - passed - skipped;
         let separator = style("─".repeat(60)).dim().to_string();
 
-        let mut parts = vec![
-            style(format!("{passed} passed")).green().bold().to_string(),
-        ];
+        let mut parts = vec![style(format!("{passed} passed")).green().bold().to_string()];
         if skipped > 0 {
-            parts.push(style(format!("{skipped} skipped")).yellow().bold().to_string());
+            parts.push(
+                style(format!("{skipped} skipped"))
+                    .yellow()
+                    .bold()
+                    .to_string(),
+            );
         }
         if failed > 0 {
             parts.push(style(format!("{failed} failed")).red().bold().to_string());

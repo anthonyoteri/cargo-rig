@@ -18,7 +18,11 @@ pub fn multiply(a: i64, b: i64) -> i64 {
 /// Returns `None` on division by zero.
 #[must_use]
 pub fn divide(a: i64, b: i64) -> Option<i64> {
-    if b == 0 { None } else { Some(a / b) }
+    if b == 0 {
+        None
+    } else {
+        Some(a / b)
+    }
 }
 
 // Stateful calculator — useful for demonstrating per-test setup / teardown.
@@ -30,7 +34,9 @@ pub struct Calculator {
 impl Calculator {
     #[must_use]
     pub fn new() -> Self {
-        Self { history: Vec::new() }
+        Self {
+            history: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, a: i64, b: i64) -> i64 {
