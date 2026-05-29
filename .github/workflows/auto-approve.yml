@@ -1,0 +1,13 @@
+name: Auto-approve Renovate
+
+on:
+  pull_request:
+
+jobs:
+  auto-approve:
+    if: github.actor == 'renovate[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: hmarr/auto-approve-action@v4
