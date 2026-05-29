@@ -1,5 +1,12 @@
 # cargo-rig
 
+[![CI](https://github.com/anthonyoteri/cargo-rig/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/anthonyoteri/cargo-rig/actions/workflows/ci.yml)
+[![rig on crates.io](https://img.shields.io/crates/v/rig.svg?label=rig)](https://crates.io/crates/rig)
+[![cargo-rig on crates.io](https://img.shields.io/crates/v/cargo-rig.svg?label=cargo-rig)](https://crates.io/crates/cargo-rig)
+[![docs.rs](https://img.shields.io/docsrs/rig?label=docs.rs)](https://docs.rs/rig)
+[![MSRV: 1.87](https://img.shields.io/badge/rustc-1.87+-orange.svg)](https://blog.rust-lang.org/2025/05/15/Rust-1.87.0.html)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/anthonyoteri/cargo-rig#license)
+
 A Cargo plugin for infrastructure and acceptance testing in Rust.
 
 cargo-rig runs each test in its own subprocess, giving you process-level isolation, parallel execution, structured output, and first-class support for shared infrastructure setup — without the overhead of spinning up a full test harness.
