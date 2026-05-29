@@ -1,6 +1,4 @@
 #![warn(clippy::pedantic)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -11,26 +9,64 @@ use syn::FnArg;
 use syn::ItemFn;
 use syn::Pat;
 
-/// Registers an async test function with the cargo-rigtest runtime.
+/// Registers an async function as a cargo-rigtest test case.
 ///
-/// Accepts optional flags:
-/// - `serial` — prevent concurrent execution with any other test
-/// - `timeout = <const Duration>` — kill and fail the test if it exceeds the duration
-/// - `retries = <N>` — retry a failed test up to N additional times
+/// The annotated function must have the signature:
 ///
-/// Flags can be combined:
+/// ```text
+/// async fn name(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> { ... }
+/// ```
+///
+/// The `ctx` parameter gives access to global setup data and per-test
+/// lifecycle hooks. The function name becomes the test name that appears in
+/// output and `--filter` expressions.
+///
+/// # Flags
+///
+/// All flags are optional and can be combined in any order.
+///
+/// | Flag | Description |
+/// |------|-------------|
+/// | `serial` | Prevents concurrent execution with any other test. |
+/// | `timeout = <Duration>` | Kills and fails the test if it exceeds the given duration. |
+/// | `retries = <N>` | Retries a failed test up to `N` additional times before reporting failure. |
+///
+/// # Examples
+///
+/// Minimal test with no flags:
+///
 /// ```ignore
+/// use std::sync::Arc;
+/// use rigtest::{testcase, TestContext};
+///
+/// #[testcase]
+/// async fn addition_works(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
+///     assert_eq!(1 + 1, 2);
+///     Ok(())
+/// }
+/// ```
+///
+/// Test with a timeout, retries, and the `serial` flag:
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use std::time::Duration;
+/// use rigtest::{testcase, TestContext};
+///
 /// #[testcase(serial, timeout = Duration::from_secs(30), retries = 2)]
-/// async fn my_test(ctx: Arc<TestContext>) -> Result<(), rigtest::Error> { ... }
+/// async fn exclusive_network_probe(_ctx: Arc<TestContext>) -> Result<(), rigtest::Error> {
+///     // network call
+///     Ok(())
+/// }
 /// ```
 ///
 /// # Timeout and teardown
 ///
 /// When a `timeout` fires the test subprocess is hard-killed. Any teardown
-/// registered with [`TestContext::teardown`] will **not** run. Resources that
+/// registered with `TestContext::teardown` will **not** run. Resources that
 /// must be released regardless of outcome (open connections, temp files, etc.)
 /// should be managed at a higher level — for example in `#[global_teardown]`,
-/// via OS-level cleanup (Drop impls, RAII guards), or by an external fixture
+/// via OS-level cleanup (`Drop` impls, RAII guards), or by an external fixture
 /// that outlives the test process.
 #[proc_macro_attribute]
 pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -38,7 +74,6 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func_ident = &func.sig.ident;
     let func_name_str = func_ident.to_string();
 
-    // Parse comma-separated meta items: serial, timeout = <expr>, retries = <expr>
     let metas = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
         .parse(attr)
         .unwrap_or_default();
@@ -64,7 +99,6 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Build a unique static name: __RIGTEST_TESTCASE_SOME_FUNCTION_NAME
     let static_ident = syn::Ident::new(
         &format!(
             "__RIGTEST_TESTCASE_{}",
@@ -74,6 +108,7 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     let expanded = quote! {
+        #[allow(clippy::unused_async)]
         #func
 
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_TEST_CASES)]
@@ -93,14 +128,43 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Registers an async global setup function with the cargo-rigtest runtime.
+/// Registers an async function as the global setup hook for a test binary.
+///
+/// The annotated function runs once before any tests and its return value is
+/// made available to every test through `TestContext::global_data`. At most
+/// one `#[global_setup]` function may be defined in a single test binary.
 ///
 /// The annotated function must have the signature:
-/// ```ignore
-/// async fn name() -> SomeType
+///
+/// ```text
+/// async fn name() -> SomeType { ... }
 /// ```
-/// The return value is stored in the `TestContext` and made available to tests.
-/// At most one `#[global_setup]` function may be defined in the test binary.
+///
+/// `SomeType` must implement both `serde::Serialize` and
+/// `serde::de::DeserializeOwned` so the runtime can pass the state to each
+/// test subprocess via an environment variable.
+///
+/// # Examples
+///
+/// ```ignore
+/// use rigtest::global_setup;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Serialize, Deserialize)]
+/// pub struct Config {
+///     pub db_url: String,
+///     pub api_key: String,
+/// }
+///
+/// #[global_setup]
+/// async fn setup() -> Config {
+///     Config {
+///         db_url: std::env::var("DB_URL")
+///             .unwrap_or_else(|_| "postgres://localhost/test".into()),
+///         api_key: std::env::var("API_KEY").expect("API_KEY must be set"),
+///     }
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn global_setup(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
@@ -112,6 +176,7 @@ pub fn global_setup(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
+        #[allow(clippy::unused_async)]
         #func
 
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_GLOBAL_SETUP)]
@@ -143,15 +208,39 @@ pub fn global_setup(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Registers an async global teardown function with the cargo-rigtest runtime.
+/// Registers an async function as the global teardown hook for a test binary.
+///
+/// The annotated function runs once after all tests have finished. It receives
+/// the value produced by `#[global_setup]` and is responsible for releasing
+/// any resources allocated during setup. At most one `#[global_teardown]`
+/// function may be defined in a single test binary.
 ///
 /// The annotated function must have the signature:
-/// ```ignore
-/// async fn name(state: SomeType)
+///
+/// ```text
+/// async fn name(state: SomeType) { ... }
 /// ```
-/// The `SomeType` must match the return type of the corresponding
-/// `#[global_setup]` function. At most one `#[global_teardown]` function
-/// may be defined in the test binary.
+///
+/// `SomeType` must match the return type of the corresponding
+/// `#[global_setup]` function.
+///
+/// # Examples
+///
+/// ```ignore
+/// use rigtest::global_teardown;
+///
+/// // `Config` is the type returned by the matching `#[global_setup]` function.
+/// #[global_teardown]
+/// async fn teardown(cfg: Config) {
+///     println!("releasing resources for {}", cfg.db_url);
+///     // close connections, delete temp data, etc.
+/// }
+/// ```
+///
+/// # Panics
+///
+/// Panics at compile time if the annotated function does not have exactly one
+/// typed parameter.
 #[proc_macro_attribute]
 pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
@@ -176,6 +265,7 @@ pub fn global_teardown(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .expect("#[global_teardown] function must have exactly one typed parameter");
 
     let expanded = quote! {
+        #[allow(clippy::unused_async)]
         #func
 
         #[::rigtest::__linkme::distributed_slice(::rigtest::registry::RIG_GLOBAL_TEARDOWN)]

@@ -5,6 +5,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use futures::FutureExt;
 use rand::seq::SliceRandom;
+use rand::RngCore;
 use rand::SeedableRng;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -68,99 +69,31 @@ fn apply_filter<'a>(
         .collect()
 }
 
-/// Run the full test suite described by `args`.
-pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
-    // ── Single-test (subprocess) mode ────────────────────────────────────────
-    if let Some(ref test_name) = args.run_single {
-        return run_single_test(test_name, args.state_env_var.as_deref()).await;
-    }
+struct RunConfig {
+    exe: std::path::PathBuf,
+    state_var: String,
+    state_json: String,
+    no_capture: bool,
+}
 
-    // ── Coordinator mode ─────────────────────────────────────────────────────
-
-    assert!(
-        RIG_GLOBAL_SETUP.len() <= 1,
-        "cargo-rigtest: at most one #[global_setup] function may be defined, found {}",
-        RIG_GLOBAL_SETUP.len()
-    );
-    assert!(
-        RIG_GLOBAL_TEARDOWN.len() <= 1,
-        "cargo-rigtest: at most one #[global_teardown] function may be defined, found {}",
-        RIG_GLOBAL_TEARDOWN.len()
-    );
-
-    // Create reporter early so it can frame setup/teardown output too.
-    let reporter = Arc::new(Reporter::new());
-
-    // Run global setup.
-    let global_data: Box<dyn std::any::Any + Send + Sync> =
-        if let Some(entry) = RIG_GLOBAL_SETUP.first() {
-            reporter.print_phase("global setup");
-            let data = (entry.setup_fn)().await;
-            data
-        } else {
-            Box::new(())
-        };
-
-    // Serialize state for subprocess handoff, choosing a randomized env var
-    // name so it is not guessable by other processes on the same host.
-    let state_var = format!("RIG_STATE_{:016x}", {
-        use rand::RngCore;
-        rand::thread_rng().next_u64()
-    });
-    let state_json: String = if let Some(entry) = RIG_GLOBAL_SETUP.first() {
-        (entry.serialize_fn)(&global_data)
-    } else {
-        String::new()
-    };
-
-    // Collect and optionally filter test cases.
-    let cases_refs: Vec<&'static crate::registry::TestCase> = RIG_TEST_CASES.iter().collect();
-    let mut cases = apply_filter(&cases_refs, args.filter.as_deref());
-
-    // Choose seed and shuffle.
-    let seed = args.seed.unwrap_or_else(|| {
-        use rand::RngCore;
-        rand::thread_rng().next_u64()
-    });
-    println!("cargo-rigtest: running with seed {seed}");
-
-    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-    cases.shuffle(&mut rng);
-
-    let total = cases.len();
-    let jobs = match (args.no_capture, args.jobs) {
-        (true, None) => 1,
-        (true, Some(n)) => {
-            eprintln!("cargo-rigtest: warning: --no-capture with --jobs={n} may interleave output");
-            n
-        }
-        (false, n) => n.unwrap_or_else(default_jobs),
-    };
-    let semaphore = Arc::new(Semaphore::new(jobs));
-
-    let exe =
-        std::env::current_exe().map_err(|e| anyhow!("failed to find current executable: {e}"))?;
-
-    let suite_start = Instant::now();
-
-    // Partition into parallel and serial. Serial tests run after all parallel
-    // tests finish so they never share the executor with another test.
-    let (serial_cases, parallel_cases): (Vec<_>, Vec<_>) =
-        cases.into_iter().partition(|tc| tc.serial);
-
+async fn dispatch_cases(
+    reporter: &Arc<Reporter>,
+    cfg: &RunConfig,
+    semaphore: Arc<Semaphore>,
+    parallel_cases: Vec<&'static crate::registry::TestCase>,
+    serial_cases: Vec<&'static crate::registry::TestCase>,
+) -> (usize, usize) {
     let mut passed = 0usize;
     let mut skipped = 0usize;
-
-    // ── Parallel phase ───────────────────────────────────────────────────────
     let mut join_set: JoinSet<Outcome> = JoinSet::new();
 
     for tc in parallel_cases {
-        let reporter = Arc::clone(&reporter);
+        let reporter = Arc::clone(reporter);
         let semaphore = Arc::clone(&semaphore);
-        let exe = exe.clone();
-        let state_var = state_var.clone();
-        let state_json = state_json.clone();
-        let no_capture = args.no_capture;
+        let exe = cfg.exe.clone();
+        let state_var = cfg.state_var.clone();
+        let state_json = cfg.state_json.clone();
+        let no_capture = cfg.no_capture;
 
         join_set.spawn(async move {
             let _permit = semaphore
@@ -182,15 +115,14 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
         }
     }
 
-    // ── Serial phase ─────────────────────────────────────────────────────────
     for tc in serial_cases {
         let (outcome, _) = run_test(
-            &reporter,
-            &exe,
+            reporter,
+            &cfg.exe,
             tc,
-            &state_var,
-            &state_json,
-            args.no_capture,
+            &cfg.state_var,
+            &cfg.state_json,
+            cfg.no_capture,
         )
         .await;
         match outcome {
@@ -200,10 +132,94 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
         }
     }
 
+    (passed, skipped)
+}
+
+/// Run the full test suite described by `args`.
+///
+/// # Errors
+///
+/// Returns an error if any test fails or if the current executable path
+/// cannot be determined.
+///
+/// # Panics
+///
+/// Panics if more than one `#[global_setup]` or `#[global_teardown]` function
+/// is registered in the binary.
+pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
+    if let Some(ref test_name) = args.run_single {
+        return run_single_test(test_name, args.state_env_var.as_deref()).await;
+    }
+
+    assert!(
+        RIG_GLOBAL_SETUP.len() <= 1,
+        "cargo-rigtest: at most one #[global_setup] function may be defined, found {}",
+        RIG_GLOBAL_SETUP.len()
+    );
+    assert!(
+        RIG_GLOBAL_TEARDOWN.len() <= 1,
+        "cargo-rigtest: at most one #[global_teardown] function may be defined, found {}",
+        RIG_GLOBAL_TEARDOWN.len()
+    );
+
+    let reporter = Arc::new(Reporter::new());
+
+    let global_setup = RIG_GLOBAL_SETUP.first();
+
+    let global_data: Box<dyn std::any::Any + Send + Sync> = if let Some(entry) = global_setup {
+        reporter.print_phase("global setup");
+        (entry.setup_fn)().await
+    } else {
+        Box::new(())
+    };
+
+    let mut rng = rand::thread_rng();
+
+    let state_var = format!("RIG_STATE_{:016x}", rng.next_u64());
+    let state_json: String = if let Some(entry) = global_setup {
+        (entry.serialize_fn)(&*global_data)
+    } else {
+        String::new()
+    };
+
+    let cases_refs: Vec<&'static crate::registry::TestCase> = RIG_TEST_CASES.iter().collect();
+    let mut cases = apply_filter(&cases_refs, args.filter.as_deref());
+
+    let seed = args.seed.unwrap_or_else(|| rng.next_u64());
+    println!("cargo-rigtest: running with seed {seed}");
+
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    cases.shuffle(&mut rng);
+
+    let total = cases.len();
+    let jobs = if args.no_capture {
+        1
+    } else {
+        args.jobs.unwrap_or_else(default_jobs)
+    };
+    let semaphore = Arc::new(Semaphore::new(jobs));
+
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow!("failed to find current executable: {e}"))?;
+
+    let cfg = RunConfig {
+        exe,
+        state_var,
+        state_json,
+        no_capture: args.no_capture,
+    };
+
+    let suite_start = Instant::now();
+
+    let (serial_cases, parallel_cases): (Vec<_>, Vec<_>) =
+        cases.into_iter().partition(|tc| tc.serial);
+
+    let (passed, skipped) =
+        dispatch_cases(&reporter, &cfg, semaphore, parallel_cases, serial_cases).await;
+
     let elapsed = suite_start.elapsed();
     reporter.finish(passed, skipped, total, elapsed);
 
-    // Run global teardown.
     if let Some(entry) = RIG_GLOBAL_TEARDOWN.first() {
         reporter.print_phase("global teardown");
         (entry.teardown_fn)(global_data).await;
@@ -239,6 +255,12 @@ enum ProcessOutcome {
 /// Grace period between SIGTERM and SIGKILL when a test times out.
 const KILL_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
 
+const SKIP_PREFIX: &str = "cargo-rigtest-skip: ";
+
+fn exit_code_reason(code: Option<i32>) -> String {
+    format!("exited with code {}", code.unwrap_or(-1))
+}
+
 /// Send SIGTERM and wait up to `KILL_GRACE_PERIOD` for the process to exit,
 /// then send SIGKILL if it is still running.
 ///
@@ -264,6 +286,132 @@ async fn graceful_kill(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
 }
 
+enum WaitOutcome {
+    Exited(std::process::ExitStatus),
+    TimedOut(std::time::Duration),
+}
+
+/// Wait for `child` to exit, killing it gracefully if `timeout` elapses.
+async fn wait_or_timeout(
+    child: &mut tokio::process::Child,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<WaitOutcome> {
+    match timeout {
+        Some(dur) => tokio::select! {
+            r = child.wait() => r.map(WaitOutcome::Exited).map_err(|e| anyhow!("{e}")),
+            () = tokio::time::sleep(dur) => {
+                graceful_kill(child).await;
+                Ok(WaitOutcome::TimedOut(dur))
+            }
+        },
+        None => child
+            .wait()
+            .await
+            .map(WaitOutcome::Exited)
+            .map_err(|e| anyhow!("{e}")),
+    }
+}
+
+fn timeout_outcome(dur: std::time::Duration) -> ProcessOutcome {
+    ProcessOutcome::Failed {
+        reason: format!("timed out after {:.1}s", dur.as_secs_f64()),
+        stdout: String::new(),
+        stderr: String::new(),
+    }
+}
+
+async fn drain_pipe<R>(handle: Option<R>) -> String
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let Some(mut h) = handle else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    let _ = h.read_to_end(&mut bytes).await;
+    if bytes.is_empty() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn skip_reason_from_stderr(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find_map(|l| l.strip_prefix(SKIP_PREFIX))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Spawn in no-capture mode: stdout inherited, stderr piped for skip-reason extraction.
+async fn spawn_no_capture(
+    mut cmd: tokio::process::Command,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<ProcessOutcome> {
+    let mut child = cmd
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
+
+    let status = match wait_or_timeout(&mut child, timeout).await? {
+        WaitOutcome::TimedOut(dur) => return Ok(timeout_outcome(dur)),
+        WaitOutcome::Exited(s) => s,
+    };
+
+    let stderr = drain_pipe(child.stderr.take()).await;
+
+    match status.code() {
+        Some(0) => Ok(ProcessOutcome::Passed),
+        Some(2) => Ok(ProcessOutcome::Skipped {
+            reason: skip_reason_from_stderr(&stderr),
+        }),
+        code => {
+            // Replay stderr to terminal since it wasn't inherited.
+            eprint!("{stderr}");
+            Ok(ProcessOutcome::Failed {
+                reason: exit_code_reason(code),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+}
+
+/// Spawn in capture mode: both stdout and stderr piped, printed only on failure.
+async fn spawn_captured(
+    mut cmd: tokio::process::Command,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<ProcessOutcome> {
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
+
+    let status = match wait_or_timeout(&mut child, timeout).await? {
+        WaitOutcome::TimedOut(dur) => return Ok(timeout_outcome(dur)),
+        WaitOutcome::Exited(s) => s,
+    };
+
+    let (stdout, stderr) = tokio::join!(
+        drain_pipe(child.stdout.take()),
+        drain_pipe(child.stderr.take())
+    );
+
+    match status.code() {
+        Some(0) => Ok(ProcessOutcome::Passed),
+        Some(2) => Ok(ProcessOutcome::Skipped {
+            reason: skip_reason_from_stderr(&stderr),
+        }),
+        code => Ok(ProcessOutcome::Failed {
+            reason: exit_code_reason(code),
+            stdout,
+            stderr,
+        }),
+    }
+}
+
 /// Run a single test subprocess, respecting timeout and capture settings.
 async fn spawn_test_process(
     exe: &std::path::Path,
@@ -273,10 +421,7 @@ async fn spawn_test_process(
     no_capture: bool,
     timeout: Option<std::time::Duration>,
 ) -> anyhow::Result<ProcessOutcome> {
-    use tokio::io::AsyncReadExt;
-    use tokio::process::Command;
-
-    let mut cmd = Command::new(exe);
+    let mut cmd = tokio::process::Command::new(exe);
     cmd.arg("--run-single")
         .arg(test_name)
         .arg("--state-env-var")
@@ -284,94 +429,9 @@ async fn spawn_test_process(
         .env(state_var, state_json);
 
     if no_capture {
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
-
-        let status = match timeout {
-            Some(dur) => tokio::select! {
-                r = child.wait() => r.map_err(|e| anyhow!("{e}"))?,
-                () = tokio::time::sleep(dur) => {
-                    graceful_kill(&mut child).await;
-                    return Ok(ProcessOutcome::Failed {
-                        reason: format!("timed out after {:.1}s", dur.as_secs_f64()),
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    });
-                }
-            },
-            None => child.wait().await.map_err(|e| anyhow!("{e}"))?,
-        };
-
-        return match status.code() {
-            Some(0) => Ok(ProcessOutcome::Passed),
-            Some(2) => Ok(ProcessOutcome::Skipped {
-                reason: String::new(),
-            }),
-            code => Ok(ProcessOutcome::Failed {
-                reason: format!("exited with code {}", code.unwrap_or(-1)),
-                stdout: String::new(),
-                stderr: String::new(),
-            }),
-        };
-    }
-
-    // Capture mode: pipe stdout/stderr, read them after the process exits.
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
-
-    let status = match timeout {
-        Some(dur) => tokio::select! {
-            r = child.wait() => r.map_err(|e| anyhow!("{e}"))?,
-            () = tokio::time::sleep(dur) => {
-                graceful_kill(&mut child).await;
-                return Ok(ProcessOutcome::Failed {
-                    reason: format!("timed out after {:.1}s", dur.as_secs_f64()),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-            }
-        },
-        None => child.wait().await.map_err(|e| anyhow!("{e}"))?,
-    };
-
-    let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
-    if let Some(mut h) = child.stdout.take() {
-        let _ = h.read_to_end(&mut stdout_bytes).await;
-    }
-    if let Some(mut h) = child.stderr.take() {
-        let _ = h.read_to_end(&mut stderr_bytes).await;
-    }
-
-    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-
-    match status.code() {
-        Some(0) => Ok(ProcessOutcome::Passed),
-        Some(2) => {
-            let reason = stderr
-                .lines()
-                .find_map(|l| l.strip_prefix("cargo-rigtest-skip: "))
-                .unwrap_or("")
-                .to_string();
-            Ok(ProcessOutcome::Skipped { reason })
-        }
-        code => {
-            let reason = if stderr.trim().is_empty() {
-                format!("exited with code {}", code.unwrap_or(-1))
-            } else {
-                stderr.trim().to_string()
-            };
-            Ok(ProcessOutcome::Failed {
-                reason,
-                stdout,
-                stderr: String::new(),
-            })
-        }
+        spawn_no_capture(cmd, timeout).await
+    } else {
+        spawn_captured(cmd, timeout).await
     }
 }
 
@@ -430,10 +490,11 @@ async fn run_test(
 
 /// Single-test mode: deserialize global state, run one test, exit.
 async fn run_single_test(test_name: &str, state_var: Option<&str>) -> anyhow::Result<()> {
-    // Deserialize state and immediately clear the env var.
     let global_data: Box<dyn std::any::Any + Send + Sync> = if let Some(var) = state_var {
         let json = std::env::var(var).unwrap_or_default();
-        std::env::remove_var(var);
+        // SAFETY: single-threaded at this point — tokio runtime not yet started,
+        // no other threads read this var.
+        unsafe { std::env::remove_var(var) };
 
         if let Some(entry) = RIG_GLOBAL_SETUP.first() {
             (entry.deserialize_fn)(&json)
@@ -459,7 +520,7 @@ async fn run_single_test(test_name: &str, state_var: Option<&str>) -> anyhow::Re
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => {
             if e.downcast_ref::<crate::Skip>().is_some() {
-                eprintln!("cargo-rigtest-skip: {e}");
+                eprintln!("{SKIP_PREFIX}{e}");
                 crate::flush_and_exit(2);
             }
             Err(anyhow!("{e}"))

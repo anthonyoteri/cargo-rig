@@ -1,6 +1,4 @@
 #![warn(clippy::pedantic)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
 
 use std::process::Command;
 use std::process::Stdio;
@@ -74,7 +72,6 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run(args: &RunArgs) -> anyhow::Result<()> {
-    // Build the test binary (or binaries) without running them.
     let mut build_cmd = Command::new("cargo");
     build_cmd
         .arg("test")
@@ -110,8 +107,6 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
 
     let all_targets = find_all_test_executables(&stdout);
 
-    // Filter to binaries that respond to --rig-probe, skipping any other
-    // harness=false test runners that happen to be in the package.
     let rig_targets: Vec<_> = all_targets
         .into_iter()
         .filter(|(_, exe)| is_rig_binary(exe))
@@ -125,11 +120,9 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         ));
     }
 
-    // If the user specified --test, narrow to those targets.
     let targets: Vec<_> = if args.test.is_empty() {
         rig_targets
     } else {
-        // Validate that every requested name exists.
         let unknown: Vec<_> = args
             .test
             .iter()
@@ -195,9 +188,16 @@ fn is_rig_binary(exe: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Search the JSON-lines output from `cargo test --no-run --message-format=json`
-/// for all `compiler-artifact` entries whose target kind is "test".
-/// Returns a list of `(name, executable_path)` pairs in the order they appear.
+/// Parse `cargo test --no-run --message-format=json` output and return all
+/// test-target executables.
+///
+/// `json_output` is the raw stdout from the `cargo test --no-run
+/// --message-format=json` invocation — a newline-delimited sequence of JSON
+/// objects. Each object is inspected for `"reason": "compiler-artifact"` with
+/// a `"target"` whose `"kind"` array contains `"test"`.
+///
+/// Returns a `Vec` of `(name, executable_path)` pairs in the order they appear
+/// in the input. Malformed lines and non-test artifacts are silently ignored.
 #[must_use]
 pub fn find_all_test_executables(json_output: &str) -> Vec<(String, String)> {
     let mut results = Vec::new();

@@ -15,6 +15,12 @@ pub struct TestContext {
 }
 
 impl TestContext {
+    /// Creates a new [`TestContext`] wrapping `global_data` produced by `#[global_setup]`.
+    ///
+    /// This is called by the cargo-rigtest coordinator inside each test subprocess
+    /// before invoking the test function. Test authors receive an already-constructed
+    /// `Arc<TestContext>` as the argument to their test function and do not call
+    /// this directly.
     #[must_use]
     pub fn new(global_data: Box<dyn Any + Send + Sync>) -> Arc<Self> {
         Arc::new(Self {
@@ -41,6 +47,10 @@ impl TestContext {
     ///     MyDb::connect(&cfg.db_url).await   // ? works naturally
     /// }).await?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the closure returns an error or if it panics.
     pub async fn setup<F, Fut, T>(&self, f: F) -> Result<T, crate::Error>
     where
         F: FnOnce(Arc<Box<dyn Any + Send + Sync>>) -> Fut,
@@ -69,6 +79,10 @@ impl TestContext {
     ///     conn.release_back_to(&cfg.pool).await   // ? works naturally
     /// }).await?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the closure returns an error or if it panics.
     ///
     /// # Teardown and timeout
     ///

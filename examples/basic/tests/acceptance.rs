@@ -1,17 +1,12 @@
-// Test functions must be `async` for the framework's BoxFuture signature.
-#![allow(clippy::unused_async)]
-
 use rigtest::{global_setup, global_teardown, testcase, TestContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Shared state created during global setup and passed to every test.
 #[derive(Serialize, Deserialize)]
 pub struct SharedState {
     pub base_url: String,
 }
 
-/// Set up shared state once before the suite runs.
 #[global_setup]
 async fn setup() -> SharedState {
     SharedState {
@@ -19,13 +14,11 @@ async fn setup() -> SharedState {
     }
 }
 
-/// Tear down shared state after the suite finishes.
 #[global_teardown]
 async fn teardown(state: SharedState) {
     println!("teardown: releasing resources for {}", state.base_url);
 }
 
-/// A test that always passes by validating a simple computation.
 #[testcase]
 async fn simple_computation(
     _ctx: Arc<TestContext>,
@@ -35,7 +28,6 @@ async fn simple_computation(
     Ok(())
 }
 
-/// A test that accesses `ctx.global_data` and downcasts to `SharedState`.
 #[testcase]
 async fn accesses_global_data(
     ctx: Arc<TestContext>,
@@ -52,7 +44,6 @@ async fn accesses_global_data(
     Ok(())
 }
 
-/// A test that demonstrates async work with a brief sleep.
 #[testcase]
 async fn async_sleep(
     _ctx: Arc<TestContext>,
@@ -61,7 +52,6 @@ async fn async_sleep(
     Ok(())
 }
 
-/// A test that builds an HTTP request without sending it (no real server needed).
 #[testcase]
 async fn builds_http_request(
     ctx: Arc<TestContext>,
