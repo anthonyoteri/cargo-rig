@@ -69,13 +69,11 @@ fn apply_filter<'a>(
 }
 
 /// Run the full test suite described by `args`.
+#[allow(clippy::too_many_lines)]
 pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
-    // ── Single-test (subprocess) mode ────────────────────────────────────────
     if let Some(ref test_name) = args.run_single {
         return run_single_test(test_name, args.state_env_var.as_deref()).await;
     }
-
-    // ── Coordinator mode ─────────────────────────────────────────────────────
 
     assert!(
         RIG_GLOBAL_SETUP.len() <= 1,
@@ -88,10 +86,8 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
         RIG_GLOBAL_TEARDOWN.len()
     );
 
-    // Create reporter early so it can frame setup/teardown output too.
     let reporter = Arc::new(Reporter::new());
 
-    // Run global setup.
     let global_data: Box<dyn std::any::Any + Send + Sync> =
         if let Some(entry) = RIG_GLOBAL_SETUP.first() {
             reporter.print_phase("global setup");
@@ -101,23 +97,19 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
             Box::new(())
         };
 
-    // Serialize state for subprocess handoff, choosing a randomized env var
-    // name so it is not guessable by other processes on the same host.
     let state_var = format!("RIG_STATE_{:016x}", {
         use rand::RngCore;
         rand::thread_rng().next_u64()
     });
     let state_json: String = if let Some(entry) = RIG_GLOBAL_SETUP.first() {
-        (entry.serialize_fn)(&global_data)
+        (entry.serialize_fn)(&*global_data)
     } else {
         String::new()
     };
 
-    // Collect and optionally filter test cases.
     let cases_refs: Vec<&'static crate::registry::TestCase> = RIG_TEST_CASES.iter().collect();
     let mut cases = apply_filter(&cases_refs, args.filter.as_deref());
 
-    // Choose seed and shuffle.
     let seed = args.seed.unwrap_or_else(|| {
         use rand::RngCore;
         rand::thread_rng().next_u64()
@@ -128,13 +120,10 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
     cases.shuffle(&mut rng);
 
     let total = cases.len();
-    let jobs = match (args.no_capture, args.jobs) {
-        (true, None) => 1,
-        (true, Some(n)) => {
-            eprintln!("cargo-rigtest: warning: --no-capture with --jobs={n} may interleave output");
-            n
-        }
-        (false, n) => n.unwrap_or_else(default_jobs),
+    let jobs = if args.no_capture {
+        1
+    } else {
+        args.jobs.unwrap_or_else(default_jobs)
     };
     let semaphore = Arc::new(Semaphore::new(jobs));
 
@@ -143,15 +132,12 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
 
     let suite_start = Instant::now();
 
-    // Partition into parallel and serial. Serial tests run after all parallel
-    // tests finish so they never share the executor with another test.
     let (serial_cases, parallel_cases): (Vec<_>, Vec<_>) =
         cases.into_iter().partition(|tc| tc.serial);
 
     let mut passed = 0usize;
     let mut skipped = 0usize;
 
-    // ── Parallel phase ───────────────────────────────────────────────────────
     let mut join_set: JoinSet<Outcome> = JoinSet::new();
 
     for tc in parallel_cases {
@@ -182,7 +168,6 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
         }
     }
 
-    // ── Serial phase ─────────────────────────────────────────────────────────
     for tc in serial_cases {
         let (outcome, _) = run_test(
             &reporter,
@@ -203,7 +188,6 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
     let elapsed = suite_start.elapsed();
     reporter.finish(passed, skipped, total, elapsed);
 
-    // Run global teardown.
     if let Some(entry) = RIG_GLOBAL_TEARDOWN.first() {
         reporter.print_phase("global teardown");
         (entry.teardown_fn)(global_data).await;
@@ -284,7 +268,11 @@ async fn spawn_test_process(
         .env(state_var, state_json);
 
     if no_capture {
+        // Stdout is inherited for real-time output. Stderr is piped so we can
+        // extract the skip reason (written as "cargo-rigtest-skip: …") while
+        // still replaying it to the terminal afterward.
         let mut child = cmd
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
 
@@ -303,20 +291,35 @@ async fn spawn_test_process(
             None => child.wait().await.map_err(|e| anyhow!("{e}"))?,
         };
 
+        use tokio::io::AsyncReadExt;
+        let mut stderr_bytes = Vec::new();
+        if let Some(mut h) = child.stderr.take() {
+            let _ = h.read_to_end(&mut stderr_bytes).await;
+        }
+        let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+
         return match status.code() {
             Some(0) => Ok(ProcessOutcome::Passed),
-            Some(2) => Ok(ProcessOutcome::Skipped {
-                reason: String::new(),
-            }),
-            code => Ok(ProcessOutcome::Failed {
-                reason: format!("exited with code {}", code.unwrap_or(-1)),
-                stdout: String::new(),
-                stderr: String::new(),
-            }),
+            Some(2) => {
+                let reason = stderr
+                    .lines()
+                    .find_map(|l| l.strip_prefix("cargo-rigtest-skip: "))
+                    .unwrap_or("")
+                    .to_string();
+                Ok(ProcessOutcome::Skipped { reason })
+            }
+            code => {
+                // Replay stderr to terminal since it wasn't inherited.
+                eprint!("{stderr}");
+                Ok(ProcessOutcome::Failed {
+                    reason: format!("exited with code {}", code.unwrap_or(-1)),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
         };
     }
 
-    // Capture mode: pipe stdout/stderr, read them after the process exits.
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -430,10 +433,11 @@ async fn run_test(
 
 /// Single-test mode: deserialize global state, run one test, exit.
 async fn run_single_test(test_name: &str, state_var: Option<&str>) -> anyhow::Result<()> {
-    // Deserialize state and immediately clear the env var.
     let global_data: Box<dyn std::any::Any + Send + Sync> = if let Some(var) = state_var {
         let json = std::env::var(var).unwrap_or_default();
-        std::env::remove_var(var);
+        // SAFETY: single-threaded at this point — tokio runtime not yet started,
+        // no other threads read this var.
+        unsafe { std::env::remove_var(var) };
 
         if let Some(entry) = RIG_GLOBAL_SETUP.first() {
             (entry.deserialize_fn)(&json)

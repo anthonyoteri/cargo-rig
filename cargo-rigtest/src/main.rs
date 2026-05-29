@@ -74,7 +74,6 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run(args: &RunArgs) -> anyhow::Result<()> {
-    // Build the test binary (or binaries) without running them.
     let mut build_cmd = Command::new("cargo");
     build_cmd
         .arg("test")
@@ -110,8 +109,6 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
 
     let all_targets = find_all_test_executables(&stdout);
 
-    // Filter to binaries that respond to --rig-probe, skipping any other
-    // harness=false test runners that happen to be in the package.
     let rig_targets: Vec<_> = all_targets
         .into_iter()
         .filter(|(_, exe)| is_rig_binary(exe))
@@ -125,11 +122,9 @@ fn run(args: &RunArgs) -> anyhow::Result<()> {
         ));
     }
 
-    // If the user specified --test, narrow to those targets.
     let targets: Vec<_> = if args.test.is_empty() {
         rig_targets
     } else {
-        // Validate that every requested name exists.
         let unknown: Vec<_> = args
             .test
             .iter()

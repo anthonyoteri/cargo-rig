@@ -1,18 +1,9 @@
-// Test functions must be `async` for the framework's BoxFuture signature.
 #![allow(clippy::unused_async)]
 
 use std::sync::Arc;
 
 use rigtest::prelude::*;
 use serde::{Deserialize, Serialize};
-
-// ── Global setup / teardown (both are optional) ───────────────────────────────
-//
-// If your tests don't need shared infrastructure, remove these two functions
-// entirely — the framework runs fine without them.
-//
-// The state type must implement Serialize + Deserialize so cargo-rigtest can pass
-// it to each test subprocess via a temporary environment variable.
 
 #[derive(Serialize, Deserialize)]
 struct State {
@@ -27,11 +18,7 @@ async fn setup() -> State {
 }
 
 #[global_teardown]
-async fn teardown(_state: State) {
-    //println!("global teardown: tests are done!");
-}
-
-// ── Tests that need no setup at all ──────────────────────────────────────────
+async fn teardown(_state: State) {}
 
 #[testcase]
 async fn add_positive_numbers(
@@ -88,30 +75,21 @@ async fn divide_by_zero_returns_none(
     Ok(())
 }
 
-// ── Tests with timeout and/or retries ────────────────────────────────────────
-
 #[testcase(timeout = std::time::Duration::from_secs(5))]
 async fn completes_within_timeout(
     _ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // This test has a 5-second timeout; it finishes in microseconds.
     assert_eq!(calculator::add(1, 1), 2);
     Ok(())
 }
-
-// ── Serial test (runs after all parallel tests complete) ──────────────────────
 
 #[testcase(serial)]
 async fn exclusive_resource_access(
     _ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // This test requires exclusive access to some resource and must not run
-    // concurrently with any other test.
     assert_eq!(calculator::multiply(6, 7), 42);
     Ok(())
 }
-
-// ── Tests that read from global setup data ────────────────────────────────────
 
 #[testcase]
 async fn respects_configured_max_operand(
@@ -122,25 +100,13 @@ async fn respects_configured_max_operand(
     Ok(())
 }
 
-// ── Tests that use per-test setup / teardown ──────────────────────────────────
-//
-// ctx.setup returns a value the test can use.
-// ctx.teardown releases it when the test is done.
-//
-// This pattern is most useful for resources with a clear lifecycle:
-// database transactions, temporary files, open connections, etc.
-
 #[testcase]
 async fn stateful_calculator_records_history(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // setup returns Result — use ? so a setup failure is reported immediately
-    // as "setup failed: …" rather than as a generic test failure.
     let mut calc = ctx
         .setup(|global| async move {
             let _cfg = global.downcast_ref::<State>().unwrap();
-            // In a real test this might open a connection using cfg.db_url,
-            // pick up a feature flag, etc. Here we just create a Calculator.
             Ok(calculator::Calculator::new())
         })
         .await?;
@@ -151,8 +117,6 @@ async fn stateful_calculator_records_history(
     assert_eq!(calc.history()[0], "2 + 3 = 5");
     assert_eq!(calc.history()[1], "10 + 20 = 30");
 
-    // teardown also returns Result — failures are reported as "teardown failed: …"
-    // and are distinct from failures in the test body above.
     ctx.teardown(|global| async move {
         let cfg = global.downcast_ref::<State>().unwrap();
         for entry in calc.history() {
@@ -179,7 +143,7 @@ async fn stateful_calculator_handles_division(
         .await?;
 
     assert_eq!(calc.divide(10, 2), Some(5));
-    assert_eq!(calc.divide(7, 0), None); // divide-by-zero logged, not panicked
+    assert_eq!(calc.divide(7, 0), None);
 
     assert_eq!(calc.history()[0], "10 / 2 = Some(5)");
     assert_eq!(calc.history()[1], "7 / 0 = None");

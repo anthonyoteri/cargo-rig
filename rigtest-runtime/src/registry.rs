@@ -32,7 +32,7 @@ unsafe impl Sync for TestCase {}
 pub struct GlobalSetupEntry {
     pub setup_fn: fn() -> BoxFuture<'static, Box<dyn std::any::Any + Send + Sync>>,
     /// Serialize the state value to a JSON string for subprocess handoff.
-    pub serialize_fn: fn(&Box<dyn std::any::Any + Send + Sync>) -> String,
+    pub serialize_fn: fn(&(dyn std::any::Any + Send + Sync)) -> String,
     /// Deserialize state from the JSON string produced by `serialize_fn`.
     pub deserialize_fn: fn(&str) -> Box<dyn std::any::Any + Send + Sync>,
 }

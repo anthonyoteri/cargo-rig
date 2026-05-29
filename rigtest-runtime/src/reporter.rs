@@ -1,6 +1,10 @@
 use std::time::Duration;
 
 use console::style;
+use indicatif::MultiProgress;
+use indicatif::ProgressBar;
+use indicatif::ProgressDrawTarget;
+use indicatif::ProgressStyle;
 
 fn indent(s: &str) -> String {
     s.lines()
@@ -8,10 +12,6 @@ fn indent(s: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-use indicatif::MultiProgress;
-use indicatif::ProgressBar;
-use indicatif::ProgressDrawTarget;
-use indicatif::ProgressStyle;
 
 /// Nextest-style reporter. In a TTY it shows live spinners per running test;
 /// in a non-TTY environment (CI, piped output) it falls back to plain lines

@@ -2,7 +2,6 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::unused_async)]
-#![allow(clippy::too_many_lines)]
 
 #[doc(hidden)]
 pub extern crate linkme as __linkme;

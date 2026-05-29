@@ -38,7 +38,6 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func_ident = &func.sig.ident;
     let func_name_str = func_ident.to_string();
 
-    // Parse comma-separated meta items: serial, timeout = <expr>, retries = <expr>
     let metas = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
         .parse(attr)
         .unwrap_or_default();
@@ -64,7 +63,6 @@ pub fn testcase(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
-    // Build a unique static name: __RIGTEST_TESTCASE_SOME_FUNCTION_NAME
     let static_ident = syn::Ident::new(
         &format!(
             "__RIGTEST_TESTCASE_{}",
