@@ -1,0 +1,29 @@
+[package]
+name = "rig"
+description = "Runtime library for the cargo-rig test framework"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rig-macros = { path = "../rig-macros" }
+tokio = { workspace = true }
+linkme = { workspace = true }
+clap = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+futures = { workspace = true }
+indicatif = { workspace = true }
+reqwest = { workspace = true, optional = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+console = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[features]
+http-client = ["reqwest"]
