@@ -10,10 +10,10 @@ jobs:
     name: Check commits
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: cocogitto/cocogitto-action@v3
+      - uses: cocogitto/cocogitto-action@v4
         with:
           check: true
           # On PRs check only the commits introduced by the PR.
