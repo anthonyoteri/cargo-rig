@@ -5,6 +5,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use futures::FutureExt;
 use rand::seq::SliceRandom;
+use rand::RngCore;
 use rand::SeedableRng;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -88,20 +89,19 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
 
     let reporter = Arc::new(Reporter::new());
 
-    let global_data: Box<dyn std::any::Any + Send + Sync> =
-        if let Some(entry) = RIG_GLOBAL_SETUP.first() {
-            reporter.print_phase("global setup");
-            let data = (entry.setup_fn)().await;
-            data
-        } else {
-            Box::new(())
-        };
+    let global_setup = RIG_GLOBAL_SETUP.first();
 
-    let state_var = format!("RIG_STATE_{:016x}", {
-        use rand::RngCore;
-        rand::thread_rng().next_u64()
-    });
-    let state_json: String = if let Some(entry) = RIG_GLOBAL_SETUP.first() {
+    let global_data: Box<dyn std::any::Any + Send + Sync> = if let Some(entry) = global_setup {
+        reporter.print_phase("global setup");
+        (entry.setup_fn)().await
+    } else {
+        Box::new(())
+    };
+
+    let mut rng = rand::thread_rng();
+
+    let state_var = format!("RIG_STATE_{:016x}", rng.next_u64());
+    let state_json: String = if let Some(entry) = global_setup {
         (entry.serialize_fn)(&*global_data)
     } else {
         String::new()
@@ -110,10 +110,7 @@ pub async fn run_suite(args: RuntimeArgs) -> anyhow::Result<()> {
     let cases_refs: Vec<&'static crate::registry::TestCase> = RIG_TEST_CASES.iter().collect();
     let mut cases = apply_filter(&cases_refs, args.filter.as_deref());
 
-    let seed = args.seed.unwrap_or_else(|| {
-        use rand::RngCore;
-        rand::thread_rng().next_u64()
-    });
+    let seed = args.seed.unwrap_or_else(|| rng.next_u64());
     println!("cargo-rigtest: running with seed {seed}");
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
@@ -223,6 +220,12 @@ enum ProcessOutcome {
 /// Grace period between SIGTERM and SIGKILL when a test times out.
 const KILL_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
 
+const SKIP_PREFIX: &str = "cargo-rigtest-skip: ";
+
+fn exit_code_reason(code: Option<i32>) -> String {
+    format!("exited with code {}", code.unwrap_or(-1))
+}
+
 /// Send SIGTERM and wait up to `KILL_GRACE_PERIOD` for the process to exit,
 /// then send SIGKILL if it is still running.
 ///
@@ -248,21 +251,29 @@ async fn graceful_kill(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
 }
 
+enum WaitOutcome {
+    Exited(std::process::ExitStatus),
+    TimedOut(std::time::Duration),
+}
+
 /// Wait for `child` to exit, killing it gracefully if `timeout` elapses.
-/// Returns `None` when the timeout fired and the child was killed.
 async fn wait_or_timeout(
     child: &mut tokio::process::Child,
     timeout: Option<std::time::Duration>,
-) -> anyhow::Result<Option<std::process::ExitStatus>> {
+) -> anyhow::Result<WaitOutcome> {
     match timeout {
         Some(dur) => tokio::select! {
-            r = child.wait() => r.map(Some).map_err(|e| anyhow!("{e}")),
+            r = child.wait() => r.map(WaitOutcome::Exited).map_err(|e| anyhow!("{e}")),
             () = tokio::time::sleep(dur) => {
                 graceful_kill(child).await;
-                Ok(None)
+                Ok(WaitOutcome::TimedOut(dur))
             }
         },
-        None => child.wait().await.map(Some).map_err(|e| anyhow!("{e}")),
+        None => child
+            .wait()
+            .await
+            .map(WaitOutcome::Exited)
+            .map_err(|e| anyhow!("{e}")),
     }
 }
 
@@ -279,9 +290,13 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt;
+    let Some(mut h) = handle else {
+        return String::new();
+    };
     let mut bytes = Vec::new();
-    if let Some(mut h) = handle {
-        let _ = h.read_to_end(&mut bytes).await;
+    let _ = h.read_to_end(&mut bytes).await;
+    if bytes.is_empty() {
+        return String::new();
     }
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -289,7 +304,7 @@ where
 fn skip_reason_from_stderr(stderr: &str) -> String {
     stderr
         .lines()
-        .find_map(|l| l.strip_prefix("cargo-rigtest-skip: "))
+        .find_map(|l| l.strip_prefix(SKIP_PREFIX))
         .unwrap_or("")
         .to_string()
 }
@@ -304,8 +319,9 @@ async fn spawn_no_capture(
         .spawn()
         .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
 
-    let Some(status) = wait_or_timeout(&mut child, timeout).await? else {
-        return Ok(timeout_outcome(timeout.unwrap_or_default()));
+    let status = match wait_or_timeout(&mut child, timeout).await? {
+        WaitOutcome::TimedOut(dur) => return Ok(timeout_outcome(dur)),
+        WaitOutcome::Exited(s) => s,
     };
 
     let stderr = drain_pipe(child.stderr.take()).await;
@@ -319,7 +335,7 @@ async fn spawn_no_capture(
             // Replay stderr to terminal since it wasn't inherited.
             eprint!("{stderr}");
             Ok(ProcessOutcome::Failed {
-                reason: format!("exited with code {}", code.unwrap_or(-1)),
+                reason: exit_code_reason(code),
                 stdout: String::new(),
                 stderr: String::new(),
             })
@@ -338,30 +354,26 @@ async fn spawn_captured(
         .spawn()
         .map_err(|e| anyhow!("failed to spawn test subprocess: {e}"))?;
 
-    let Some(status) = wait_or_timeout(&mut child, timeout).await? else {
-        return Ok(timeout_outcome(timeout.unwrap_or_default()));
+    let status = match wait_or_timeout(&mut child, timeout).await? {
+        WaitOutcome::TimedOut(dur) => return Ok(timeout_outcome(dur)),
+        WaitOutcome::Exited(s) => s,
     };
 
-    let stdout = drain_pipe(child.stdout.take()).await;
-    let stderr = drain_pipe(child.stderr.take()).await;
+    let (stdout, stderr) = tokio::join!(
+        drain_pipe(child.stdout.take()),
+        drain_pipe(child.stderr.take())
+    );
 
     match status.code() {
         Some(0) => Ok(ProcessOutcome::Passed),
         Some(2) => Ok(ProcessOutcome::Skipped {
             reason: skip_reason_from_stderr(&stderr),
         }),
-        code => {
-            let reason = if stderr.trim().is_empty() {
-                format!("exited with code {}", code.unwrap_or(-1))
-            } else {
-                stderr.trim().to_string()
-            };
-            Ok(ProcessOutcome::Failed {
-                reason,
-                stdout,
-                stderr: String::new(),
-            })
-        }
+        code => Ok(ProcessOutcome::Failed {
+            reason: exit_code_reason(code),
+            stdout,
+            stderr,
+        }),
     }
 }
 
@@ -473,7 +485,7 @@ async fn run_single_test(test_name: &str, state_var: Option<&str>) -> anyhow::Re
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => {
             if e.downcast_ref::<crate::Skip>().is_some() {
-                eprintln!("cargo-rigtest-skip: {e}");
+                eprintln!("{SKIP_PREFIX}{e}");
                 crate::flush_and_exit(2);
             }
             Err(anyhow!("{e}"))

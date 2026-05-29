@@ -8,9 +8,14 @@ use indicatif::ProgressStyle;
 
 fn indent(s: &str) -> String {
     s.lines()
-        .map(|l| format!("  {l}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .fold(String::with_capacity(s.len()), |mut acc, line| {
+            if !acc.is_empty() {
+                acc.push('\n');
+            }
+            acc.push_str("  ");
+            acc.push_str(line);
+            acc
+        })
 }
 
 /// Nextest-style reporter. In a TTY it shows live spinners per running test;
