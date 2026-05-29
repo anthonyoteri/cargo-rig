@@ -2,13 +2,22 @@
 # https://docs.cocogitto.io/config/
 
 ignore_merge_commits = true
+ignore_fixup_commits = true
 tag_prefix = "v"
+branch_whitelist = ["main"]
+from_latest_tag = true
 
 # Update the workspace version in Cargo.toml before committing the release.
 pre_bump_hooks = [
   "cargo set-version {{version}}",
   "cargo check --workspace",
   "git add Cargo.toml Cargo.lock",
+]
+
+# Push the bump commit and tag to the remote after a successful bump.
+post_bump_hooks = [
+  "git push",
+  "git push origin {{version_tag}}",
 ]
 
 [changelog]
