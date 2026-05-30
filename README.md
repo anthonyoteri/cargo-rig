@@ -9,51 +9,116 @@
 
 A Cargo plugin for infrastructure and acceptance testing in Rust.
 
-cargo-rigtest runs each test in its own subprocess, giving you process-level isolation, parallel execution, structured output, and first-class support for shared infrastructure setup — without the overhead of spinning up a full test harness.
+cargo-rigtest runs each test in its own subprocess, giving you
+process-level isolation, parallel execution, structured output, and
+first-class support for shared infrastructure setup — without the overhead
+of spinning up a full test harness.
 
 ---
 
 ## Overview
 
-cargo-rigtest is designed for the layer of tests that sit above unit tests: API integration tests, service smoke tests, environment verification, end-to-end workflows. It is not a replacement for `#[test]` — it is a complement to it.
+Most Rust projects have two test layers covered: unit tests with `#[test]`,
+and integration tests that compile and run a local binary. The third layer
+— *acceptance tests against a deployed system* — is almost always handled
+by reaching for another tool: pytest, Postman, shell scripts.
 
-Key properties:
+`cargo-rigtest` closes that gap. It is a Cargo plugin for running
+acceptance and end-to-end tests against real, deployed infrastructure —
+the kind of tests you run after a deploy to staging to confirm the system
+behaves as intended under real conditions, with real traffic and real
+service dependencies.
 
-- Each test runs in its own subprocess — a panic or crash in one test cannot affect others
-- Tests run in parallel by default, with a configurable concurrency limit
-- A single `#[global_setup]` / `#[global_teardown]` pair provisions and tears down shared infrastructure once per suite
-- Per-test setup and teardown hooks are available via `TestContext`
-- Tests can be marked `serial`, given a `timeout`, or configured to `retry` on failure
-- Output is captured per-test and printed only on failure, nextest-style
-- A `rigtest::skip!` macro lets tests opt out at runtime with a reason
+**The motivating use case:** a service is deployed to a staging
+environment. Before promoting to production, you want to verify that the
+signup flow completes, authenticated requests are accepted, and data
+persists correctly. These aren't unit tests — the binary is already
+compiled and running. They aren't local integration tests — there's nothing
+to mock. They're acceptance tests, and `cargo-rigtest` lets you write them
+in Rust.
+
+Unlike a Python test harness bolted onto a Rust project, `cargo-rigtest`
+lives entirely inside your Cargo workspace. Test code can import your own
+types, reuse your HTTP client configuration, and be checked by the same
+compiler and CI pipeline as the rest of your project.
+
+---
+
+## Features
+
+cargo-rigtest is built around a few core ideas: tests that can't interfere
+with each other, infrastructure that's set up once and shared cleanly, and
+output that tells you exactly what failed without making you dig through
+logs.
+
+- **Process isolation** — each test runs in its own subprocess; a panic
+  or crash cannot affect other tests
+- **Parallel execution** — tests run concurrently by default, configurable
+  with `--jobs`
+- **Global setup & teardown** — `#[global_setup]` and `#[global_teardown]`
+  provision and clean up shared infrastructure once per suite
+- **Per-test lifecycle** — `TestContext` provides scoped `setup` and
+  `teardown` hooks for resources that belong to a single test
+- **Serial, timeout, and retry** — opt individual tests into exclusive
+  execution, a hard time limit, or automatic retries
+- **Captured output** — held per test and printed only on failure,
+  nextest-style
+- **Runtime skip** — `rigtest::skip!("reason")` lets a test opt out
+  gracefully at runtime
 
 ---
 
 ## Installation
 
-Install the Cargo plugin:
+Getting started is two steps: install the `cargo rigtest` command, then
+add the `rigtest` library to your project.
+
+### Install the CLI
+
+**From crates.io** (builds from source — requires a Rust toolchain):
 
 ```
 cargo install cargo-rigtest
 ```
 
-Add the runtime library to your project:
+**Pre-built binaries** are available for macOS, Linux, and Windows on the
+[releases page](https://github.com/anthonyoteri/cargo-rigtest/releases).
+macOS and Linux releases are `.tar.gz` archives — extract and place
+`cargo-rigtest` somewhere on your `PATH`. The Windows release is a plain
+`.exe` — download it, rename it if desired, and place it on your `PATH`.
+
+> **macOS note:** The release binaries are ad-hoc signed but not notarized
+> or Developer ID signed. Gatekeeper may block the binary on first launch
+> with a security warning. You can bypass this by right-clicking the binary
+> in Finder and choosing **Open**, or by running
+> `xattr -d com.apple.quarantine /path/to/cargo-rigtest` in your terminal.
+> The Homebrew method below handles this automatically and is the
+> recommended install path on macOS.
+
+**Homebrew** (macOS and Linux):
+
+```
+brew tap anthonyoteri/tap
+brew install cargo-rigtest
+```
+
+### Add the library
 
 ```toml
 [dev-dependencies]
 rigtest = "0.1"
 ```
 
-### Optional features
-
-| Feature | Description |
-|---------|-------------|
-| `http-client` | Adds a pre-built `reqwest::Client` as `ctx.client`, available to every test. Enable it if your tests make HTTP calls and you want a shared client without constructing one manually. |
+If your tests make HTTP calls, enable the `http-client` feature to get a
+pre-built `reqwest::Client` available as `ctx.client` in every test:
 
 ```toml
 [dev-dependencies]
 rigtest = { version = "0.1", features = ["http-client"] }
 ```
+
+You can also make HTTP calls without this feature — just bring your own
+client library and construct it in your tests.
 
 ---
 
@@ -120,7 +185,8 @@ cargo rigtest run
 
 ### `#[testcase]`
 
-Registers an async function as a test case. The function must have this signature:
+Registers an async function as a test case. The function must have this
+signature:
 
 ```rust
 async fn name(ctx: Arc<TestContext>) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
@@ -138,13 +204,18 @@ Optional flags can be combined in any order:
 | `timeout = <Duration>` | Hard-kill the test subprocess and report failure if it exceeds the duration |
 | `retries = <N>` | Retry a failing test up to N additional times before reporting failure |
 
-> **Note on timeout and teardown:** when a timeout fires the subprocess is hard-killed. Any
-> teardown registered with `ctx.teardown(...)` will not run. Resources that must be
-> released regardless of outcome should use RAII guards or `#[global_teardown]`.
+> **Note on timeout and teardown:** when a timeout fires, the subprocess is
+> terminated — on Linux and macOS a graceful signal is sent first, with a
+> short window for the process to exit cleanly before a hard kill follows;
+> on Windows the process is hard-killed immediately. Either way, teardown
+> registered with `ctx.teardown(...)` will not run. Resources that must be
+> released regardless of outcome should be handled in
+> `#[global_teardown]`, which runs outside the test subprocess.
 
 ### `#[global_setup]`
 
-Runs once before any test in the suite. The return value is serialized and passed to each test subprocess via a temporary environment variable. At most one may be defined.
+Runs once before any test in the suite. The return value is serialized and
+passed to each test subprocess. At most one may be defined.
 
 ```rust
 #[global_setup]
@@ -153,44 +224,39 @@ async fn setup() -> MyState {
 }
 ```
 
-The return type must implement `serde::Serialize` and `serde::Deserialize` — it is serialized to JSON and forwarded to each test subprocess via a temporary environment variable. Store configuration values (URLs, ports, credentials) rather than live handles.
+The return type must implement `serde::Serialize` and `serde::Deserialize`
+— the state is serialized to cross the process boundary into each test
+subprocess. This means it can only hold serializable values: URLs, ports,
+credentials, identifiers. Live resources such as connection pools, file
+descriptors, and socket handles cannot survive the round-trip — store the
+configuration needed to recreate them instead.
 
 ### `#[global_teardown]`
 
-Runs once after all tests finish. Receives the value produced by `#[global_setup]`. At most one may be defined.
+Runs once after all tests finish. Receives the value produced by
+`#[global_setup]`. At most one may be defined.
 
 ```rust
 #[global_teardown]
 async fn teardown(state: MyState) {
-    // state is the deserialized form of what setup returned — connection
-    // handles and other live resources cannot survive the round-trip.
-    // Use the serializable fields (e.g. a URL or ID) to reconnect and clean up.
     MyDb::connect(&state.db_url).await.unwrap().drop_schema().await;
 }
 ```
-
-> **Note:** The global state type must implement `serde::Serialize` and
-> `serde::Deserialize` because it is serialized to JSON and passed to each
-> test subprocess via a temporary environment variable. Live resources such
-> as connection pools, file descriptors, and socket handles cannot be
-> serialized — store the configuration needed to recreate them instead (a
-> URL, a path, a port number).
 
 ---
 
 ## Per-test setup and teardown
 
-`TestContext` provides `setup` and `teardown` hooks for resources with a clear per-test lifecycle.
-
-The `global` argument passed to both closures is the deserialized global state — the same value produced by `#[global_setup]` and subject to the same constraint: it contains only serializable configuration (URLs, ports, credentials), not live handles. Use it to *create* a live resource; the resource itself lives entirely within the test subprocess and is not subject to any serialization requirement.
+`TestContext` provides `setup` and `teardown` hooks for resources with a
+clear per-test lifecycle. The `global` argument in both closures is the
+deserialized state from `#[global_setup]` — use it to create live
+resources within the test.
 
 ```rust
 #[testcase]
 async fn creates_a_record(
     ctx: Arc<TestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // `global` holds deserialized config — use it to open a live connection.
-    // The returned `conn` is a live resource that exists only in this subprocess.
     let mut conn = ctx
         .setup(|global| async move {
             let state = global.downcast_ref::<State>().unwrap();
@@ -201,7 +267,6 @@ async fn creates_a_record(
     conn.insert("hello").await?;
     assert_eq!(conn.count().await?, 1);
 
-    // `conn` is moved into the teardown closure — still a live resource here.
     ctx.teardown(|_global| async move {
         conn.rollback().await?;
         Ok(())
@@ -250,7 +315,8 @@ cargo rigtest run [OPTIONS]
 | `--package <NAME>` | Package containing the test targets |
 | `--no-capture` | Print test output in real time instead of capturing it (implies `--jobs 1`) |
 
-The seed is printed at the start of every run so a failing order can be reproduced exactly:
+The seed is printed at the start of every run so a failing order can be
+reproduced exactly:
 
 ```
 cargo rigtest run --seed 12345678
@@ -260,7 +326,8 @@ cargo rigtest run --seed 12345678
 
 ## Output
 
-cargo-rigtest produces nextest-style output. In a TTY, running tests show live spinners; results are printed as they complete:
+cargo-rigtest produces nextest-style output. In a TTY, running tests show
+live spinners; results are printed as they complete:
 
 ```
 ── global setup
@@ -283,7 +350,8 @@ In CI or piped output, spinners are replaced with plain lines so no output is lo
 
 ## Multiple test targets
 
-If a package has more than one rigtest test target, all of them are discovered and run in sequence automatically:
+If a package has more than one rigtest test target, all of them are
+discovered and run in sequence automatically:
 
 ```
 cargo rigtest run                          # run all rigtest targets
@@ -291,7 +359,8 @@ cargo rigtest run --test smoke             # run one
 cargo rigtest run --test smoke --test e2e  # run two
 ```
 
-cargo-rigtest identifies rigtest test targets automatically and ignores any other `harness = false` binaries in the package.
+cargo-rigtest identifies rigtest test targets automatically and ignores any
+other `harness = false` binaries in the package.
 
 ---
 
@@ -306,4 +375,5 @@ cargo-rigtest identifies rigtest test targets automatically and ignores any othe
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
